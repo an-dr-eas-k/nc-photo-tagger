@@ -1,0 +1,20 @@
+[Unit]
+Description=Nextcloud photo tagger (local AI)
+Documentation=file://%h/.config/nc-photo-tagger/config.toml
+After=graphical-session.target network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/nc-photo-tagger/venv/bin/nc-photo-tagger run
+Restart=on-failure
+RestartSec=60
+# Only use otherwise idle CPU / disk time
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+
+[Install]
+WantedBy=graphical-session.target

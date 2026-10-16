@@ -1,0 +1,7 @@
+{
+  "uuid": "nc-photo-tagger@nc-photo-tagger",
+  "name": "Photo Tagger",
+  "description": "Shows the progress of the nc-photo-tagger service (local AI tagging of Nextcloud photos).",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "version": 1
+}

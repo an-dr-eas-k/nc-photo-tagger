@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nc-photo-tagger"
+version = "0.1.0"
+description = "Tags a local Nextcloud photo library with a small local AI model (CLIP + face recognition) and uploads the tags to Nextcloud"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+    "fastembed>=0.7",
+    "opencv-python-headless>=4.8",
+    "pillow>=10",
+    "pillow-heif>=0.16",
+    "numpy>=1.26",
+    "requests>=2.31",
+    "keyring>=24",
+]
+
+[project.scripts]
+nc-photo-tagger = "nc_photo_tagger.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
