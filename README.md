@@ -49,6 +49,10 @@ Uninstall: `./uninstall.sh` (keeps config, state and faces) or `./uninstall.sh -
    in Nextcloud if needed) and **removes `(pt)` tags that no longer apply** – e.g. after you removed
    a tag from the list, raised the threshold or renamed a person. Tags without the ` (pt)` suffix are
    never touched. Photos that are not on the server yet (sync pending) are retried later.
+   For speed the sync works folder by folder: one request lists the files and their current tags,
+   then the changes are sent over several parallel connections (`connections` in `[nextcloud]`,
+   default 8). If the server answers with errors (HTTP 5xx / 429) the app automatically backs off
+   to fewer connections and speeds up again when the server copes.
 
 ## Tags
 
@@ -88,15 +92,25 @@ Note: Nextcloud collaborative tags are global — other users of the server can 
 
 ## Top bar
 
-Hover the camera icon for the progress, click it for details and actions: pause/resume,
-name faces, rescan, regroup faces, open settings, restart service. The icon is dimmed when the
-service is paused / not running and shows a warning sign on Nextcloud problems.
+Hover the camera icon for the progress, click it for details and actions: the two switches
+below, name faces, rescan, regroup faces, open settings, restart service. The icon is dimmed
+when the service is not running and shows a warning sign on Nextcloud problems.
+
+Two independent switches (they persist across restarts):
+
+- **Tag photos locally** – the AI analysis. Off: no photo is analyzed (no CPU use), new photos are only counted.
+- **Sync tags to Nextcloud** – the upload / removal of tags. Off: the app never talks to the server;
+  analyzed photos queue up and are synced as soon as you switch it on.
+
+E.g. analyze everything first, check the results with `nc-photo-tagger test`, then switch sync on.
 
 ## Commands
 
 ```
 nc-photo-tagger status            progress in the terminal
-nc-photo-tagger pause | resume
+nc-photo-tagger analysis on|off   local AI tagging
+nc-photo-tagger sync on|off       tag sync with Nextcloud
+nc-photo-tagger pause | resume    both switches off / on
 nc-photo-tagger rescan | recluster
 nc-photo-tagger test IMAGE...     tag scores + recognized people (no changes)
 nc-photo-tagger setup --password  change the stored app password

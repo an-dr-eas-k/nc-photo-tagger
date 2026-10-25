@@ -9,10 +9,12 @@ import logging
 import os
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import __version__
-from .config import (CACHE_DIR, DB_FILE, PAUSE_FLAG, RECLUSTER_FLAG, RESCAN_FLAG, STATUS_FILE, Config)
+from .config import (ANALYSIS_OFF_FLAG, CACHE_DIR, DB_FILE, RECLUSTER_FLAG, RESCAN_FLAG, STATUS_FILE,
+                     SYNC_OFF_FLAG, Config)
 from .credentials import get_password
 from .db import ANALYZED, DB, DONE, ERROR, PENDING
 from .nextcloud import AuthError, Nextcloud, NotOnServer, ServerError, TagForbidden
@@ -53,6 +55,7 @@ class Service:
         self.forbidden: dict[str, float] = {}
         self.tagger = None
         self.people = None
+        self._executor: ThreadPoolExecutor | None = None
         self._last_status = 0.0
 
     # ---- status for the GNOME extension ----------------------------------------------------
@@ -83,7 +86,8 @@ class Service:
             "unknown_dir": str(self.cfg.unknown_dir),
             "known_dir": str(self.cfg.known_dir),
             "server": self.server_msg,
-            "paused": PAUSE_FLAG.exists(),
+            "analysis_enabled": not ANALYSIS_OFF_FLAG.exists(),
+            "sync_enabled": not SYNC_OFF_FLAG.exists(),
             "updated": now,
         }
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -140,22 +144,18 @@ class Service:
                 last_people = now
                 self.retag(self.people.sync())
 
-            if PAUSE_FLAG.exists():
-                self._set("paused", "Paused")
-                self.write_status()
-                self._sleep(2)
-                continue
-
+            analysis_on = not ANALYSIS_OFF_FLAG.exists()
+            sync_on = not SYNC_OFF_FLAG.exists()
             worked = False
-            path = self.db.next_pending()
+            path = self.db.next_pending() if analysis_on else None
             if path:
                 self.analyze(path)
                 worked = True
-            if self.people and (RECLUSTER_FLAG.exists() or now - last_cluster_check >= 60):
+            if analysis_on and self.people and (RECLUSTER_FLAG.exists() or now - last_cluster_check >= 60):
                 last_cluster_check = now
                 if self._cluster_due(idle=not path):
                     self.cluster()
-            if self.upload_one():
+            if sync_on and self.upload_one():
                 worked = True
 
             if not worked:
@@ -169,11 +169,19 @@ class Service:
 
     def _set_idle_message(self) -> None:
         counts = self.db.counts()
-        waiting = counts.get(ANALYZED, 0)
-        if self.server_msg:
+        pending, waiting = counts.get(PENDING, 0), counts.get(ANALYZED, 0)
+        analysis_on = not ANALYSIS_OFF_FLAG.exists()
+        sync_on = not SYNC_OFF_FLAG.exists()
+        if not analysis_on and not sync_on:
+            self._set("paused", "Local tagging and Nextcloud sync are switched off")
+        elif not analysis_on and not (sync_on and waiting):
+            self._set("paused", f"Local tagging is switched off ({pending:,} photos not analyzed)")
+        elif sync_on and self.server_msg:
             self._set("waiting", self.server_msg)
+        elif not sync_on and waiting:
+            self._set("paused", f"Nextcloud sync is switched off ({waiting:,} photos waiting)")
         elif waiting:
-            self._set("waiting", f"{waiting} photos waiting to be synced to Nextcloud")
+            self._set("waiting", f"{waiting:,} photos waiting to be synced to Nextcloud")
         else:
             self._set("idle", "All photos tagged – watching for new ones")
 
@@ -312,70 +320,107 @@ class Service:
                 self.server_msg = "No Nextcloud app password – run 'nc-photo-tagger setup'"
                 self.server_retry = time.time() + 120
                 return None
-            self.nc = Nextcloud(self.cfg.url, self.cfg.user, password)
+            self.nc = Nextcloud(self.cfg.url, self.cfg.user, password, connections=self.cfg.sync_connections)
         return self.nc
 
     def upload_one(self) -> bool:
+        """Sync the tags of all waiting photos of one folder. Returns False if there was nothing to do."""
         now = time.time()
         if now < self.server_retry:
             return False
-        item = self.db.next_upload(now)
-        if not item:
+        batch = self.db.upload_batch(now)
+        if not batch:
             return False
         nc = self._client()
         if nc is None:
             return False
-        path, tags, uploaded = item
-        remote = self.cfg.remote_path(path)
-        if remote is None:
-            self.db.set_error(path, "not inside a configured folder")
-            return True
 
-        self._set("working", f"Uploading tags for {self._rel(path)}")
-        self.write_status()
-        up = set(uploaded)
-        want = {t.casefold(): t for t in tags}
-        sfx = self.cfg.tag_suffix.casefold()
+        folder = os.path.dirname(batch[0][0])
+        remote_dir = self.cfg.remote_path(folder + "/x")
+        if remote_dir is None:
+            for path, _, _ in batch:
+                self.db.set_error(path, "not inside a configured folder")
+            return True
+        remote_dir = remote_dir.rsplit("/", 1)[0]
+
+        self._set("working", f"Syncing tags of {self._rel(folder)}")
+        self.write_status(force=True)
         try:
-            fid = nc.file_id(remote)
-            # Only tags with our suffix are managed (added / removed); all other tags stay untouched.
-            ours = {n: i for n, i in nc.file_tags(fid).items() if sfx and n.casefold().endswith(sfx)}
-            present = {n.casefold() for n in ours}
-            up = {t for k, t in want.items() if k in present}
-            stuck = False
-            for name, tid in ours.items():
-                if name.casefold() not in want:
-                    try:
-                        nc.unassign(fid, tid)
-                        log.debug("%s: removed tag %r", remote, name)
-                    except TagForbidden as e:
-                        log.warning("%s", e)
-                        stuck = True
-            for key, tag in sorted(want.items()):
-                if key in present or self.forbidden.get(tag, 0) > now:
+            on_server = nc.list_dir(remote_dir)
+            futures = {}
+            pool = self._pool()
+            for path, tags, uploaded in batch:
+                entry = on_server.get(os.path.basename(path))
+                if entry is None:  # not synced to the server yet
+                    self.db.set_uploaded(path, uploaded, done=False, retry_at=now + NOT_SYNCED_RETRY)
                     continue
+                futures[pool.submit(self._sync_file, nc, entry[0], entry[1], tags)] = (path, uploaded)
+
+            failure: ServerError | None = None
+            for fut in as_completed(futures):
+                if fut.cancelled():  # sync switched off: the photo simply stays queued
+                    continue
+                path, uploaded = futures[fut]
                 try:
-                    nc.assign(fid, nc.tag_id(tag))
-                    up.add(tag)
-                except TagForbidden as e:
-                    log.warning("%s", e)
-                    self.forbidden[tag] = now + TAG_FORBIDDEN_RETRY
-            ok = not (set(tags) - up) and not stuck
-            self.db.set_uploaded(path, list(up), done=ok, retry_at=0 if ok else now + TAG_FORBIDDEN_RETRY)
+                    up, ok = fut.result()
+                except NotOnServer:
+                    self.db.set_uploaded(path, uploaded, done=False, retry_at=now + NOT_SYNCED_RETRY)
+                except ServerError as e:  # retried with the next batch, after a pause
+                    failure = failure or e
+                    self.db.set_uploaded(path, uploaded, done=False)
+                else:
+                    self.db.set_uploaded(path, list(up), done=ok, retry_at=0 if ok else now + TAG_FORBIDDEN_RETRY)
+                if SYNC_OFF_FLAG.exists():  # switched off meanwhile: finish what is already running
+                    for f in futures:
+                        f.cancel()
+                self.write_status()
+            if failure:
+                raise failure
             self.server_msg = ""
             self.server_backoff = 60
-        except NotOnServer:
-            log.debug("not on server yet: %s", remote)
-            self.db.set_uploaded(path, list(up), done=False, retry_at=now + NOT_SYNCED_RETRY)
         except AuthError as e:
-            self.db.set_uploaded(path, list(up), done=False)
             self._server_failed(str(e), 600)
             self.nc = None
         except ServerError as e:
-            self.db.set_uploaded(path, list(up), done=False)
             self._server_failed(f"Nextcloud not reachable – retrying ({e})", self.server_backoff)
             self.server_backoff = min(self.server_backoff * 2, 1800)
         return True
+
+    def _pool(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self.cfg.sync_connections, thread_name_prefix="sync")
+        return self._executor
+
+    def _sync_file(self, nc: Nextcloud, fid: int, on_server: dict[str, int], tags: list[str]) -> tuple[set[str], bool]:
+        """Make the tags of one file match `tags`. Runs in a worker thread, touches only the server.
+
+        Only tags with our suffix are managed (added / removed); all other tags stay untouched.
+        Returns (wanted tags that are on the server, everything in sync)."""
+        now = time.time()
+        sfx = self.cfg.tag_suffix.casefold()
+        want = {t.casefold(): t for t in tags}
+        ours = {n: i for n, i in on_server.items() if sfx and n.casefold().endswith(sfx)}
+        present = {n.casefold() for n in ours}
+        up = {t for k, t in want.items() if k in present}
+        stuck = False
+        for name, tid in ours.items():
+            if name.casefold() not in want:
+                try:
+                    nc.unassign(fid, tid)
+                    log.debug("file %d: removed tag %r", fid, name)
+                except TagForbidden as e:
+                    log.warning("%s", e)
+                    stuck = True
+        for key, tag in sorted(want.items()):
+            if key in present or self.forbidden.get(tag, 0) > now:
+                continue
+            try:
+                nc.assign(fid, nc.tag_id(tag))
+                up.add(tag)
+            except TagForbidden as e:
+                log.warning("%s", e)
+                self.forbidden[tag] = now + TAG_FORBIDDEN_RETRY
+        return up, not (set(tags) - up) and not stuck
 
     def _server_failed(self, msg: str, delay: float) -> None:
         log.warning("%s", msg)

@@ -102,6 +102,24 @@ class DB:
                ORDER BY path DESC LIMIT 1""", (now,)).fetchone()
         return (row[0], json.loads(row[1]), json.loads(row[2])) if row else None
 
+    def upload_batch(self, now: float, limit: int = 200) -> list[tuple[str, list[str], list[str]]]:
+        """Files waiting for upload that live in the same folder as the next one in the queue."""
+        first = self.next_upload(now)
+        if not first:
+            return []
+        prefix = first[0].rsplit("/", 1)[0] + "/"
+        rows = self.con.execute(
+            """SELECT path, tags, uploaded FROM files
+               WHERE status='analyzed' AND retry_at<=? AND substr(path, 1, ?)=? ORDER BY path DESC""",
+            (now, len(prefix), prefix))
+        batch = []
+        for path, tags, uploaded in rows:
+            if "/" not in path[len(prefix):]:
+                batch.append((path, json.loads(tags), json.loads(uploaded)))
+                if len(batch) >= limit:
+                    break
+        return batch
+
     def save_analysis(self, path: str, clip: np.ndarray, faces: list) -> list[int]:
         with self.con:
             self.con.execute("DELETE FROM faces WHERE path=?", (path,))

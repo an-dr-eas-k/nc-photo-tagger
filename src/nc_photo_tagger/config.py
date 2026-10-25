@@ -26,7 +26,9 @@ MODEL_DIR = CACHE_DIR / "models"
 
 # Files shared with the GNOME Shell extension
 STATUS_FILE = CACHE_DIR / "status.json"
-PAUSE_FLAG = CACHE_DIR / "paused"
+# Switches (flag file present = switched off), persisted across restarts
+ANALYSIS_OFF_FLAG = CACHE_DIR / "analysis-off"  # no local AI tagging
+SYNC_OFF_FLAG = CACHE_DIR / "sync-off"  # no communication with Nextcloud
 RESCAN_FLAG = CACHE_DIR / "rescan"
 RECLUSTER_FLAG = CACHE_DIR / "recluster"
 
@@ -48,6 +50,7 @@ class Config:
     exclude: list[str]
     rescan_minutes: float
     threads: int
+    sync_connections: int
     threshold: float
     background_prompts: list[str]
     tags: dict[str, list[str]]
@@ -106,6 +109,7 @@ def load(path: Path = CONFIG_FILE) -> Config:
         exclude=list(scan.get("exclude", [])),
         rescan_minutes=float(scan.get("rescan_minutes", 30)),
         threads=int(scan.get("threads", 0)),
+        sync_connections=max(1, int(raw.get("nextcloud", {}).get("connections", 8))),
         threshold=float(tagging.get("threshold", 0.30)),
         background_prompts=list(tagging.get("background_prompts", ["a photo", "an image", "a blurry photo"])),
         tags=tags,
@@ -226,6 +230,8 @@ def default_config_text(url: str, user: str, folders: list[tuple[str, str]]) -> 
 url = {toml_str(url)}
 user = {toml_str(user)}
 # The app password is stored in the GNOME keyring: run `nc-photo-tagger setup`.
+# Parallel requests when syncing tags (higher = faster, but more load on the server)
+connections = 8
 
 # Local folder (synced by the Nextcloud desktop client) and the matching path on the server.
 {folder_text}

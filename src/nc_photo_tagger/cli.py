@@ -88,6 +88,8 @@ def cmd_status(args) -> int:
     age = time.time() - st.get("updated", 0)
     print(f"{st['percent']}% of {st['total']:,} files done  ({st['state']}, updated {age:.0f}s ago)")
     print(f"  {st['message']}")
+    print(f"  local tagging: {'on' if st.get('analysis_enabled', True) else 'OFF'}   "
+          f"Nextcloud sync: {'on' if st.get('sync_enabled', True) else 'OFF'}")
     print(f"  pending analysis: {st['pending']:,}   waiting for upload: {st['waiting']:,}   errors: {st['errors']:,}")
     print(f"  known people: {st['people']}   unknown face groups to name: {st['clusters']}  ({st['unknown_dir']})")
     if st.get("server"):
@@ -163,8 +165,15 @@ def main() -> None:
     t.add_argument("--top", type=int, default=8)
     t.set_defaults(func=cmd_test)
 
-    sub.add_parser("pause", help="pause the service").set_defaults(func=lambda a: _flag(C.PAUSE_FLAG, True))
-    sub.add_parser("resume", help="resume the service").set_defaults(func=lambda a: _flag(C.PAUSE_FLAG, False))
+    for name, flag, what in (("analysis", C.ANALYSIS_OFF_FLAG, "local AI tagging of photos"),
+                             ("sync", C.SYNC_OFF_FLAG, "syncing tags with Nextcloud")):
+        sw = sub.add_parser(name, help=f"switch {what} on or off")
+        sw.add_argument("state", choices=["on", "off"])
+        sw.set_defaults(func=lambda a, f=flag: _flag(f, a.state == "off"))
+    sub.add_parser("pause", help="switch analysis and sync off").set_defaults(
+        func=lambda a: (_flag(C.ANALYSIS_OFF_FLAG, True), _flag(C.SYNC_OFF_FLAG, True)))
+    sub.add_parser("resume", help="switch analysis and sync on").set_defaults(
+        func=lambda a: (_flag(C.ANALYSIS_OFF_FLAG, False), _flag(C.SYNC_OFF_FLAG, False)))
     sub.add_parser("rescan", help="rescan the photo folders now").set_defaults(
         func=lambda a: _flag(C.RESCAN_FLAG, True))
     sub.add_parser("recluster", help="regroup unknown faces now").set_defaults(

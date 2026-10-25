@@ -78,12 +78,18 @@ class Indicator extends PanelMenu.Button {
         this._serverItem = info();
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._pauseItem = new PopupMenu.PopupSwitchMenuItem('Paused', false);
-        this._pauseItem.connect('toggled', (_item, state) => {
-            setFlag('paused', state);
+        this._analysisItem = new PopupMenu.PopupSwitchMenuItem('Tag photos locally', true);
+        this._analysisItem.connect('toggled', (_item, state) => {
+            setFlag('analysis-off', !state);
             this._refreshSoon();
         });
-        this.menu.addMenuItem(this._pauseItem);
+        this.menu.addMenuItem(this._analysisItem);
+        this._syncItem = new PopupMenu.PopupSwitchMenuItem('Sync tags to Nextcloud', true);
+        this._syncItem.connect('toggled', (_item, state) => {
+            setFlag('sync-off', !state);
+            this._refreshSoon();
+        });
+        this.menu.addMenuItem(this._syncItem);
 
         this._namesItem = this.menu.addAction('Name unknown faces…', () =>
             openPath(this._status?.unknown_dir ??
@@ -175,7 +181,8 @@ class Indicator extends PanelMenu.Button {
         this._serverItem.label.text = st?.server ?? '';
         this._serverItem.visible = !!st?.server;
         this._namesItem.label.text = st?.clusters ? `Name unknown faces (${st.clusters} groups)…` : 'Name unknown faces…';
-        this._pauseItem.setToggleState(!!st?.paused);
+        this._analysisItem.setToggleState(st?.analysis_enabled ?? true);
+        this._syncItem.setToggleState(st?.sync_enabled ?? true);
 
         this._icon.opacity = stale || st?.state === 'paused' ? 120 : 255;
         this._icon.icon_name = st?.server && !stale ? 'dialog-warning-symbolic' : 'camera-photo-symbolic';
