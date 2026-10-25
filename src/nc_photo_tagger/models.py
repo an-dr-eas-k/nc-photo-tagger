@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +42,38 @@ def _normalize(v: np.ndarray) -> np.ndarray:
     return (v / np.maximum(n, 1e-12)).astype(np.float32)
 
 
+class AestheticScorer:
+    """LAION-Aesthetics V1: a linear layer on the CLIP ViT-B/32 image embedding -> score of about 1..10."""
+
+    URL = "https://github.com/LAION-AI/aesthetic-predictor/raw/main/sa_0_4_vit_b_32_linear.pth"
+    FILE = "aesthetic_vit_b_32.npz"
+
+    def __init__(self):
+        path = MODEL_DIR / self.FILE
+        if not path.exists():
+            self._download(path)
+        data = np.load(path)
+        self.w, self.b = data["w"], float(data["b"])
+
+    def _download(self, path: Path) -> None:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        log.info("downloading aesthetic model ...")
+        tmp = path.with_suffix(".pth")
+        urllib.request.urlretrieve(self.URL, tmp)
+        # The torch checkpoint is a zip of raw float32 tensors; weight (512) and bias (1) differ in size.
+        with zipfile.ZipFile(tmp) as z:
+            blobs = sorted((i for i in z.infolist() if "/data/" in i.filename), key=lambda i: -i.file_size)
+            w = np.frombuffer(z.read(blobs[0]), np.float32)
+            b = np.frombuffer(z.read(blobs[1]), np.float32)
+        if w.shape != (512,) or b.shape != (1,):
+            raise RuntimeError("unexpected aesthetic model format")
+        np.savez(path, w=w, b=b[0])
+        tmp.unlink()
+
+    def score(self, embs: np.ndarray) -> np.ndarray:
+        return np.atleast_2d(embs).astype(np.float32) @ self.w + self.b
+
+
 class ClipTagger:
     IMAGE_MODEL = "Qdrant/clip-ViT-B-32-vision"
     TEXT_MODEL = "Qdrant/clip-ViT-B-32-text"
@@ -62,8 +95,15 @@ class ClipTagger:
         self.names: list[str] = []
         self._T = np.zeros((0, 512), np.float32)
         self._owner = np.zeros(0, int)
+        self._aesthetic: AestheticScorer | None = None
+        self._aesthetic_tag = ""
+        self._aesthetic_min = 0.0
 
-    def configure(self, tags: dict[str, list[str]], background: list[str]) -> None:
+    def configure(self, tags: dict[str, list[str]], background: list[str],
+                  aesthetic_tag: str = "", aesthetic_min: float = 0.0) -> None:
+        self._aesthetic_tag, self._aesthetic_min = aesthetic_tag, aesthetic_min
+        if aesthetic_tag and self._aesthetic is None:
+            self._aesthetic = AestheticScorer()
         prompts, owner = [], []
         for i, ps in enumerate(tags.values()):
             prompts += ps
@@ -92,9 +132,18 @@ class ClipTagger:
         p /= p.sum(axis=1, keepdims=True)
         return p[:, : len(self.names)]
 
+    def aesthetic_scores(self, embs: np.ndarray) -> np.ndarray | None:
+        return self._aesthetic.score(embs) if self._aesthetic_tag and self._aesthetic else None
+
     def tags_for(self, embs: np.ndarray, threshold: float) -> list[list[str]]:
         probs = self.probabilities(embs)
-        return [[self.names[j] for j in np.flatnonzero(row >= threshold)] for row in probs]
+        out = [[self.names[j] for j in np.flatnonzero(row >= threshold)] for row in probs]
+        scores = self.aesthetic_scores(embs)
+        if scores is not None:
+            for tags, s in zip(out, scores):
+                if s >= self._aesthetic_min:
+                    tags.append(self._aesthetic_tag)
+        return out
 
 
 @dataclass

@@ -121,7 +121,8 @@ class Service:
         from .models import ClipTagger, FaceEngine
 
         self.tagger = ClipTagger(self.cfg.threads)
-        self.tagger.configure(self.cfg.tags, self.cfg.background_prompts)
+        self.tagger.configure(self.cfg.tags, self.cfg.background_prompts,
+                              self.cfg.aesthetic_tag, self.cfg.aesthetic_threshold)
         engine = FaceEngine(self.cfg.min_face_px, threads=self.cfg.threads) if self.cfg.faces_enabled else None
         if engine:
             self.people = People(self.cfg, self.db, engine)
@@ -191,7 +192,7 @@ class Service:
         """Re-apply tags to all analyzed photos if tags / threshold / prefix changed."""
         cfg = self.cfg
         sig = hashlib.sha1(json.dumps([cfg.tags, cfg.background_prompts, cfg.threshold, cfg.tag_prefix,
-                                       cfg.tag_suffix,
+                                       cfg.tag_suffix, cfg.aesthetic_tag, cfg.aesthetic_threshold,
                                        self.tagger.IMAGE_MODEL]).encode()).hexdigest()
         if self.db.get_meta("tag_config") == sig:
             return

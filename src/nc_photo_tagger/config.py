@@ -53,6 +53,8 @@ class Config:
     sync_connections: int
     threshold: float
     background_prompts: list[str]
+    aesthetic_tag: str
+    aesthetic_threshold: float
     tags: dict[str, list[str]]
     faces_enabled: bool
     known_dir: Path
@@ -112,6 +114,8 @@ def load(path: Path = CONFIG_FILE) -> Config:
         sync_connections=max(1, int(raw.get("nextcloud", {}).get("connections", 8))),
         threshold=float(tagging.get("threshold", 0.30)),
         background_prompts=list(tagging.get("background_prompts", ["a photo", "an image", "a blurry photo"])),
+        aesthetic_tag=str(tagging.get("aesthetic_tag", "highlight")),
+        aesthetic_threshold=float(tagging.get("aesthetic_threshold", 6.0)),
         tags=tags,
         faces_enabled=bool(faces.get("enabled", True)),
         known_dir=_expand(faces.get("known_dir", str(DATA_DIR / "faces" / "known"))),
@@ -253,6 +257,10 @@ suffix = " (pt)"
 prompt_template = "a photo of {{}}"
 # Catch-all descriptions that "win" when none of the tags fit. Never uploaded.
 background_prompts = ["a photo", "an image", "a blurry photo"]
+# Photos rated >= aesthetic_threshold (about 1..10, most photos are 4.5-6) by a small aesthetic
+# model get this tag. Empty string = off. `nc-photo-tagger test <image>` shows the score.
+aesthetic_tag = "highlight"
+aesthetic_threshold = 6.0
 
 [faces]
 enabled = true

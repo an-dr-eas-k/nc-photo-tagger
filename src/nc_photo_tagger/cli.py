@@ -107,7 +107,7 @@ def cmd_test(args) -> int:
 
     cfg = C.load()
     tagger = ClipTagger(cfg.threads)
-    tagger.configure(cfg.tags, cfg.background_prompts)
+    tagger.configure(cfg.tags, cfg.background_prompts, cfg.aesthetic_tag, cfg.aesthetic_threshold)
     people = None
     if cfg.faces_enabled:
         engine = FaceEngine(cfg.min_face_px, threads=cfg.threads)
@@ -123,9 +123,12 @@ def cmd_test(args) -> int:
         emb = tagger.embed(img)
         probs = tagger.probabilities(emb)[0]
         order = np.argsort(-probs)[: args.top]
-        tags = [tagger.names[i] + cfg.tag_suffix for i in np.flatnonzero(probs >= cfg.threshold)]
+        tags = [t + cfg.tag_suffix for t in tagger.tags_for(emb, cfg.threshold)[0]]
         print(f"\n{path}")
         print("  scores: " + ", ".join(f"{tagger.names[i]} {probs[i]:.2f}" for i in order))
+        aes = tagger.aesthetic_scores(emb)
+        if aes is not None:
+            print(f"  aesthetic: {aes[0]:.2f} (tag '{cfg.aesthetic_tag}' at >= {cfg.aesthetic_threshold})")
         print(f"  tags (>= {cfg.threshold}): {', '.join(tags) or '-'}")
         if cfg.faces_enabled:
             faces = people.engine.faces(img) if people else []
